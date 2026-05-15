@@ -1,0 +1,8 @@
+# Ignore data and environment files
+data/raw/*
+data/processed/*
+.env
+.venv/
+__pycache__/
+*.tif
+*.tiff
