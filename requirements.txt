@@ -1,0 +1,14 @@
+# Data Ingestion & STAC API
+pystac-client
+planetary-computer
+
+# Cloud-Native Geospatial Processing
+stackstac
+xarray
+rioxarray
+rasterio
+
+# Vector Mathematics & Zonal Statistics
+geopandas
+pandas
+shapely
