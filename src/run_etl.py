@@ -1,10 +1,14 @@
-import os
+import requests
+import pandas as pd
 import numpy as np
 import geopandas as gpd
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+import pystac_client
+import planetary_computer
+import stackstac
 # Import the database models we built earlier
-from db_setup import VegetationStat, PermitBoundary 
+from db_setup import VegetationStat, PermitBoundary, ClimateStat
 
 # --- 1. Database Connection Setup ---
 DB_URL = "postgresql://postgres:postgres_admin_password@localhost:5432/silverbell"
@@ -78,30 +82,108 @@ def extract_and_load_stats(session, array, valid_mask, year, index_type):
         
     print(f"✅ Staged {index_type} metrics for {year}.")
 
+def fetch_climate_data(session):
+    """Fetches historical precipitation data and loads it into the database."""
+    print("\n🌧️ Connecting to Open-Meteo Climate API...")
+    
+    # Silverbell Mine rough coordinates
+    url = "https://archive-api.open-meteo.com/v1/archive"
+    params = {
+        "latitude": 32.38,
+        "longitude": -111.49,
+        "start_date": "2020-01-01",
+        "end_date": "2025-12-31",
+        "daily": "precipitation_sum",
+        "timezone": "America/Phoenix"
+    }
+    
+    response = requests.get(url, params=params)
+    data = response.json()
+    
+    # Convert the daily API response into a Pandas DataFrame
+    df = pd.DataFrame({
+        "date": pd.to_datetime(data["daily"]["time"]),
+        "precip_mm": data["daily"]["precipitation_sum"]
+    })
+    
+    # Extract the year, and sum the daily rainfall into annual totals
+    df['year'] = df['date'].dt.year
+    annual_precip = df.groupby('year')['precip_mm'].sum().reset_index()
+    
+    # Load into the database
+    for _, row in annual_precip.iterrows():
+        year = int(row['year'])
+        # Check if it already exists to prevent duplicates
+        exists = session.query(ClimateStat).filter_by(year=year).first()
+        if not exists:
+            stat = ClimateStat(year=year, precip_mm=float(round(row['precip_mm'], 2)))
+            session.add(stat)
+            
+    session.commit()
+    print("✅ Annual precipitation data successfully loaded to PostGIS.")
+
 def run_pipeline():
     session = Session()
+
+    # 0. Fetch auxiliary climate data
+    fetch_climate_data(session)
+
     # 1. Ensure our spatial boundary is in the database
     load_boundary_to_db(session, "../data/raw/silverbell_aoi.geojson", "Silverbell Mine")
     
-    # NOTE: For brevity in this script, we are mocking the STAC API fetch and masking. 
-    # In your actual codebase, you will insert your `stackstac` and `rasterio.mask` logic here
-    # inside a loop like: `for year in range(2020, 2026):`
+    # --- PRODUCTION API FETCH STARTS HERE ---
+    print("\n🌍 Connecting to Microsoft Planetary Computer STAC API...")
+    catalog = pystac_client.Client.open(
+        "https://planetarycomputer.microsoft.com/api/stac/v1",
+        modifier=planetary_computer.sign_inplace,
+    )
     
-    print("\n[MOCK] Commencing multi-year API fetch and processing (2020-2025)...")
-    
-    # Simulating the multi-year loop processing
+    # Get the bounding box of our AOI to feed to the STAC search
+    gdf = gpd.read_file("../data/raw/silverbell_aoi.geojson")
+    bbox_wgs84 = tuple(gdf.total_bounds) # (minx, miny, maxx, maxy)
+
+    # The Production Multi-Year Loop
     for year in range(2020, 2026):
         print(f"\n--- Processing Year: {year} ---")
+        time_range = f"{year}-09-01/{year}-10-31" # Post-Monsoon Window
         
-        # Simulating masked arrays (you will replace this with real masked STAC data)
-        mock_red = np.random.uniform(0.05, 0.3, 1000)
-        mock_nir = np.random.uniform(0.1, 0.4, 1000)
-        valid_mask = ~np.isnan(mock_red)
+        # 1. Search the STAC API
+        search = catalog.search(
+            collections=["sentinel-2-l2a"],
+            bbox=bbox_wgs84,
+            datetime=time_range,
+            query={"eo:cloud_cover": {"lt": 10}}
+        )
+        items = search.item_collection()
+        print(f"Found {len(items)} satellite scenes. Building datacube...")
         
-        # 2. Calculate both indices
-        ndvi_array, savi_array = calculate_indices(mock_red, mock_nir)
+        if len(items) == 0:
+            print(f"⚠️ Warning: No clear imagery found for {year}. Skipping.")
+            continue
+            
+        # 2. Build the Stackstac Datacube (Only pulling Red and NIR to save RAM)
+        cube = stackstac.stack(
+            items,
+            assets=["B04", "B08"], 
+            bounds_latlon=bbox_wgs84,
+            epsg=32612, 
+            resolution=10
+        )
         
-        # 3. Extract and load into the database via SQLAlchemy
+        # 3. Compute Median Composite (Removes transient clouds/shadows)
+        print("Downloading arrays and computing median composite... (This may take a minute)")
+        median_cube = cube.median(dim="time", skipna=True).compute()
+        
+        # 4. Extract standard Numpy Arrays
+        red_band = median_cube.sel(band="B04").values
+        nir_band = median_cube.sel(band="B08").values
+        
+        # Create a valid pixel mask (ignores NoData areas around the tile edges)
+        valid_mask = ~np.isnan(red_band) & ~np.isnan(nir_band)
+        
+        # 5. Calculate Indices & Load to Database
+        ndvi_array, savi_array = calculate_indices(red_band, nir_band)
+        
         extract_and_load_stats(session, ndvi_array, valid_mask, year, "NDVI")
         extract_and_load_stats(session, savi_array, valid_mask, year, "SAVI")
     
@@ -115,5 +197,32 @@ def run_pipeline():
     finally:
         session.close()
 
+def export_for_tableau():
+    """Queries the final database and exports a flat file for Tableau Public."""
+    print("\nExtracting final warehouse data for Tableau Public...")
+    
+    query = """
+        SELECT 
+            v.year, 
+            v.index_type, 
+            v.classification, 
+            v.area_hectares, 
+            v.percentage,
+            c.precip_mm
+        FROM vegetation_stats v
+        LEFT JOIN climate_stats c ON v.year = c.year
+        ORDER BY v.year, v.index_type, v.classification;
+    """
+    
+    df = pd.read_sql(query, engine)
+    
+    output_path = "../data/processed/v2_dashboard_export.csv"
+    df.to_csv(output_path, index=False)
+    print(f"✅ Tableau extract saved to: {output_path}")
+
 if __name__ == "__main__":
+    # 1. Run the main ETL process (extract, transform, load to PostGIS)
     run_pipeline()
+    
+    # 2. Extract the final CSV for Tableau Public
+    export_for_tableau()

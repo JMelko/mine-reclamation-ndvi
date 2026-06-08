@@ -26,6 +26,13 @@ class PermitBoundary(Base):
     # GeoAlchemy2 automatically handles the PostGIS geometry typing
     geom = Column(Geometry('POLYGON', srid=4326)) 
 
+# 3. The Climate Data Table
+class ClimateStat(Base):
+    __tablename__ = 'climate_stats'
+    
+    year = Column(Integer, primary_key=True)
+    precip_mm = Column(Float, nullable=False)
+
 def init_db():
     DB_URL = "postgresql://postgres:postgres_admin_password@localhost:5432/silverbell"
     engine = create_engine(DB_URL)
