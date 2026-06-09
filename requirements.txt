@@ -1,14 +1,22 @@
-# Data Ingestion & STAC API
+# --- EXTRACT: APIs & Data Ingestion ---
 pystac-client
 planetary-computer
+requests
 
-# Cloud-Native Geospatial Processing
+# --- TRANSFORM: Matrix Math & Geospatial Processing ---
+numpy
+pandas
+geopandas
 stackstac
 xarray
 rioxarray
 rasterio
-
-# Vector Mathematics & Zonal Statistics
-geopandas
-pandas
 shapely
+
+# --- LOAD: Spatial Database Architecture ---
+SQLAlchemy
+GeoAlchemy2
+psycopg2-binary
+
+# --- PRESENT: Visualization & Reporting ---
+matplotlib
