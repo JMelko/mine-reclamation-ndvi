@@ -23,7 +23,7 @@ class PermitBoundary(Base):
     
     id = Column(Integer, primary_key=True)
     site_name = Column(String(100), nullable=False)
-    # GeoAlchemy2 automatically handles the PostGIS geometry typing
+   
     geom = Column(Geometry('POLYGON', srid=4326)) 
 
 # 3. The Climate Data Table
